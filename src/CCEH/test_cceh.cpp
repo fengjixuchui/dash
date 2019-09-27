@@ -11,7 +11,7 @@
 #include <mutex>
 #include <condition_variable>
 
-//#define FIXED 1
+#define FIXED 1
 //#define MIXED_TEST 1
 //#define TEST_BANDWIDTH 1
 

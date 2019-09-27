@@ -23,6 +23,7 @@
 
 #define _INVALID 0 /* we use 0 as the invalid key*/
 #define SINGLE 1
+//#define POINTER_BITMAP
 //#define COUNTING 1
 
 #define SIMD 1
@@ -257,22 +258,37 @@ struct  Bucket {
   Value_t check_and_get(uint8_t meta_hash, T key, bool probe) {
     int mask = 0;
     SSE_CMP8(finger_array, meta_hash);
+    int _bitmap = bitmap;
     if (!probe) {
-      mask = mask & GET_BITMAP(bitmap) & ((~(*(int *)membership)) & allocMask);
+      mask = mask & GET_BITMAP(_bitmap) & ((~(*(int *)membership)) & allocMask);
     } else {
-      mask = mask & GET_BITMAP(bitmap) & ((*(int *)membership) & allocMask);
+      mask = mask & GET_BITMAP(_bitmap) & ((*(int *)membership) & allocMask);
     }
-
+    int snapshot = _bitmap >> 18;
     if constexpr (std::is_pointer_v<T>){
+#ifdef POINTER_BITMAP
+      string_key* _key = reinterpret_cast<string_key *>(key);
+      if (mask != 0) {
+        for (int i = 0; i < 14; i += 1) {
+          if (CHECK_BIT(mask, i)) {
+            if(CHECK_BIT(snapshot, i)){
+              if((var_compare((char *)(_[i].key), _key->key, (reinterpret_cast<string_key *>(_[i].key))->length, _key->length))){
+                return _[i].value;
+              }
+            }else if(_[i].key == key){
+              return _[i].value;
+            }
+          } 
+        }
+      }
+#else
       string_key* _key = reinterpret_cast<string_key *>(key);
       if (mask != 0) {
         for (int i = 0; i < 12; i += 4) {
-          //if (CHECK_BIT(mask, i) && (strcmp(_[i].key, key) == 0)) {
-          //  return _[i].value;
-          //}
           if (CHECK_BIT(mask, i) && (var_compare((char *)(_[i].key), _key->key, (reinterpret_cast<string_key *>(_[i].key))->length, _key->length))) {
             return _[i].value;
           }
+        //}
 
           if (CHECK_BIT(mask, i+1) && (var_compare((char *)(_[i + 1].key), _key->key, (reinterpret_cast<string_key *>(_[i + 1].key))->length, _key->length))) {
             return _[i+1].value;
@@ -295,6 +311,7 @@ struct  Bucket {
             return _[13].value;
         }
       }
+#endif
     }else{
       /*loop unrolling*/
       if (mask != 0) {
@@ -411,6 +428,15 @@ struct  Bucket {
     return (old_version != value);
   }
 
+  inline void set_pointer_bitmap(int index){
+    auto new_bitmap = bitmap | (1 << (index + 18));
+    bitmap = new_bitmap;
+  }
+
+  inline bool test_pointer_set(int index){
+    return (bitmap & (1 << (index + 18)));
+  } 
+
   int Insert(T key, Value_t value, uint8_t meta_hash, bool probe) {
     auto slot = find_empty_slot();
     /* this branch can be optimized out*/
@@ -419,13 +445,36 @@ struct  Bucket {
       printf("cannot find the empty slot, for key %llu\n", key);
       return -1;
     }
-    _[slot].value = value;
-    _[slot].key = key;
+#ifdef POINTER_BITMAP
+    /*need to first set the pointer bit before store the real key-value*/
+    if constexpr (std::is_pointer_v<T>){
+      if((reinterpret_cast<string_key *>(key))->length > 8){
+        set_pointer_bitmap(slot);
+        mfence();
+        _[slot].value = value;
+        _[slot].key = key;
+      }else{
+        std::cout << "I cannot enter this area" << std::endl;
+        /*Assume the smallest variable lenght key is 8B*/
+        uint64_t* target_key = (uint64_t*)((reinterpret_cast<string_key *>(key))->key);
+        _[slot].value = value;
+        *((uint64_t*)_[slot].key) = *target_key;
+      }
+    }else{
+      _[slot].value = value;
+      _[slot].key = key;
+    }
+#else
+      _[slot].value = value;
+      _[slot].key = key;
+#endif
+
 #ifdef PMEM
     Allocator::Persist(&_[slot], sizeof(_[slot]));
 #endif
     mfence();
     set_hash(slot, meta_hash, probe);
+    //Set the 
     return 0;
   }
 
@@ -827,6 +876,7 @@ RETRY:
 
   if (((GET_COUNT(target->bitmap)) == kNumPairPerBucket) &&
       ((GET_COUNT(neighbor->bitmap)) == kNumPairPerBucket)) {
+        /*
       Bucket<T> *next_neighbor = bucket + ((y + 2) & bucketMask);
       // Next displacement
       if (!next_neighbor->try_get_lock()) {
@@ -858,13 +908,13 @@ RETRY:
       ret = Prev_displace(target, prev_neighbor, neighbor,key, value, meta_hash);
       if (ret == 0) {
         return 0;
-      }
+      }*/
 
       Bucket<T> *stash = bucket + kNumBucket;
       if (!stash->try_get_lock()) {
         neighbor->release_lock();
         target->release_lock();
-        prev_neighbor->release_lock();
+        //prev_neighbor->release_lock();
         return -2;
       }
       ret =
@@ -873,7 +923,7 @@ RETRY:
       stash->release_lock();
       neighbor->release_lock();
       target->release_lock();
-      prev_neighbor->release_lock();
+      //prev_neighbor->release_lock();
       return ret;
   }
 
@@ -923,6 +973,9 @@ void Table<T>::Insert4split(T key, Value_t value, size_t key_hash,
   // assert(insert_target->count < kNumPairPerBucket);
   /*some bucket may be overflowed?*/
   if (GET_COUNT(insert_target->bitmap) < kNumPairPerBucket) {
+#ifdef POINTER_BITMAP
+    insert_target->set_pointer_bitmap(GET_COUNT(insert_target->bitmap));
+#endif
     insert_target->_[GET_COUNT(insert_target->bitmap)].key = key;
     insert_target->_[GET_COUNT(insert_target->bitmap)].value = value;
     insert_target->set_hash(GET_COUNT(insert_target->bitmap), meta_hash, probe);
@@ -931,6 +984,7 @@ void Table<T>::Insert4split(T key, Value_t value, size_t key_hash,
 #endif
   } else {
     /*do the displacement or insertion in the stash*/
+#ifndef POINTER_BITMAP
     Bucket<T> *next_neighbor = bucket + ((y + 2) & bucketMask);
     int displace_index;
     displace_index = neighbor->Find_org_displacement();
@@ -975,7 +1029,7 @@ void Table<T>::Insert4split(T key, Value_t value, size_t key_hash,
 #endif
       return;
     }
-
+    #endif
     Stash_insert(target, neighbor, key, value, meta_hash, y & stashMask);
   }
 }
@@ -985,6 +1039,7 @@ Table<T> *Table<T>::Split(size_t _key_hash) {
   size_t new_pattern = (pattern << 1) + 1;
   size_t old_pattern = pattern << 1;
 
+  //std::cout << "do the split operation" << std::endl;
   Bucket<T> *curr_bucket;
   for (int i = 1; i < kNumBucket; ++i) {
     curr_bucket = bucket + i;
@@ -1289,6 +1344,7 @@ int Finger_EH<T>::Insert(T key, Value_t value) {
     key_hash = h(&key, sizeof(key));
     //printf("Insert the fixed length key = %lld\n", key);
   }
+  //std::cout << "Insert the new key " << key << std::endl; 
   auto meta_hash = ((uint8_t)(key_hash & kMask));  // the last 8 bits
 RETRY:
   auto old_sa = dir;

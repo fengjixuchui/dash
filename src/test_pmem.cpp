@@ -11,7 +11,7 @@
 #include <mutex>
 #include <condition_variable>
 
-#define LINEAR 1
+//#define LINEAR 1
 //#define FIXED 1
 //#define MIXED_TEST 1
 //#define TEST_BANDWIDTH 1
@@ -482,7 +482,7 @@ int main(int argc, char const *argv[]) {
   generalBench(rarray, thread_num, "Pos_get_", &concurr_get);
 
   /*********************Benchmark for delete ****************************/
-  /*
+  
   printf("Delete workload begin\n");
 
   for (int i = 0; i < thread_num; ++i) {
@@ -490,6 +490,6 @@ int main(int argc, char const *argv[]) {
     rarray[i].end = (i + 1) * chunk_size + 1;
   }
   rarray[thread_num - 1].end = insert_num + 1;
-  generalBench(rarray, thread_num, "Delete_", &concurr_delete);*/
+  generalBench(rarray, thread_num, "Delete_", &concurr_delete);
   return 0;
 }
