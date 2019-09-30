@@ -12,7 +12,7 @@
 #include "utils.h"
 
 //#define LINEAR 1
-//#define FIXED 1
+#define FIXED 1
 //#define MIXED_TEST 1
 //#define TEST_BANDWIDTH 1
 
@@ -34,6 +34,11 @@ Finger_EH<Key_t> *eh;
 #else
 Finger_EH<char *> *eh;
 #endif
+
+template <class T>
+std::atomic<uint32_t> TlsTablePool<T>::all_allocated(0);
+template <class T>
+Table<T> *TlsTablePool<T>::all_tables = nullptr;
 
 #else
 
@@ -317,14 +322,14 @@ void generate_16B(void *memory_region, int generate_num, bool persist) {
 void generalBench(range *rarray, int thread_num, std::string profile_name,
                   void (*test_func)(struct range *)) {
   std::thread *thread_array[1024];
-  profile_name = profile_name + std::to_string(thread_num);
+  //profile_name = profile_name + std::to_string(thread_num);
   double duration;
   finished = false;
   clear_cache(thread_num);
   bar_a = 1;
   bar_b = thread_num;
   bar_c = thread_num;
-  System::profile(profile_name, [&]() {
+  //System::profile(profile_name, [&]() {
     for (int i = 0; i < thread_num; ++i) {
       thread_array[i] = new std::thread(*test_func, &rarray[i]);
     }
@@ -354,7 +359,7 @@ void generalBench(range *rarray, int thread_num, std::string profile_name,
         (double)(tv2.tv_usec - tv1.tv_usec) / 1000000 +
             (double)(tv2.tv_sec - tv1.tv_sec),
         insert_num / duration);
-  });
+  //});
 }
 
 int main(int argc, char const *argv[]) {
@@ -377,6 +382,7 @@ int main(int argc, char const *argv[]) {
   std::cout << "The inserted number is " << insert_num << std::endl;
   std::cout << "The thread number is " << thread_num << std::endl;
 
+TlsTablePool<Key_t>::Initialize();
   srand((unsigned)time(NULL));
   initialize_index(initCap);
   /*************************************************Generate

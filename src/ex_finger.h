@@ -2,6 +2,7 @@
 #define CUCKOO
 
 #include <immintrin.h>
+#include <atomic>
 #include <bitset>
 #include <cassert>
 #include <cmath>
@@ -712,10 +713,59 @@ struct Directory {
   }
 };
 
+template <class T>
+struct TlsTablePool {
+  static Table<T> *all_tables;
+  static std::atomic<uint32_t> all_allocated;
+  static const uint32_t kAllTables = 327680;
+
+  static void AllocateMore() {
+    auto callback = [](PMEMobjpool *pool, void *ptr, void *arg) {
+      return 0;
+    };
+    std::pair callback_para(0, nullptr);
+    Allocator::Allocate((void **)&all_tables, kCacheLineSize, sizeof(Table<T>) * kAllTables, 
+                        callback, reinterpret_cast<void *>(&callback_para));
+    memset((void *)all_tables, 0, sizeof(Table<T>) * kAllTables);
+    all_allocated = 0;
+    printf("MORE ");
+  }
+
+  TlsTablePool() {}
+  static void Initialize() {
+    AllocateMore();
+  }
+
+  Table<T> *tables = nullptr;
+  static const uint32_t kTables = 128;
+  uint32_t allocated = kTables;
+
+  void TlsPrepare() {
+  retry:
+    uint32_t n = all_allocated.fetch_add(kTables);
+    if (n == kAllTables) {
+      AllocateMore();
+      printf("NO MORE\n");
+      abort();
+      goto retry;
+    }
+    tables = all_tables + n;
+    allocated = 0;
+  }
+
+  Table<T> *Get() {
+    if (allocated == kTables) {
+      TlsPrepare();
+    }
+    return &tables[allocated++];
+  }
+};
+
 /* the meta hash-table referenced by the directory*/
 template <class T>
 struct Table {
   static void New(Table<T> **tbl, size_t depth, Table<T> *pp) {
+    thread_local TlsTablePool<T> tls_pool;
 #ifdef PMEM
     auto callback = [](PMEMobjpool *pool, void *ptr, void *arg) {
       auto value_ptr = reinterpret_cast<std::pair<size_t, Table<T> *> *>(arg);
@@ -726,10 +776,16 @@ struct Table {
       return 0;
     };
     std::pair callback_para(depth, pp);
+
+/*
     Allocator::Allocate((void **)tbl, kCacheLineSize, sizeof(Table<T>),
                         callback, reinterpret_cast<void *>(&callback_para));
+    */
+    *tbl = tls_pool.Get();
+    (*tbl)->local_depth = depth;
+    (*tbl)->next = pp;
 #else
-    Allocator::ZAllocate((void **)tbl, kCacheLineSize, sizeof(Table<T>));
+    Allocator::Allocate((void **)tbl, kCacheLineSize, sizeof(Table<T>));
     (*tbl)->local_depth = depth;
     (*tbl)->next = pp;
 #endif
